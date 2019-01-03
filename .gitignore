@@ -12,3 +12,4 @@ rebar.lock
 _build/
 priv/
 doc/
+mix.lock
