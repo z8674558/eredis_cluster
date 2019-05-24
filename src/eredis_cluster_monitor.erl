@@ -100,7 +100,7 @@ reload_slots_map(State = #state{pool_name = PoolName}) ->
 
     NewState.
 
-get_cluster_slots(_, _State) ->
+get_cluster_slots([], _State) ->
     throw({error,cannot_connect_to_cluster});
 get_cluster_slots([Node|T], State) ->
     case safe_eredis_start_link(Node, State) of
@@ -231,8 +231,8 @@ handle_cast(_Msg, State) ->
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, #state{slots_maps = SlotsMap}) ->
-    SlotsMapList = tuple_to_list(SlotsMap),
+terminate(_Reason, #state{slots_maps = Slots}) ->
+    SlotsMapList = tuple_to_list(Slots),
     [eredis_cluster_pool:stop(SlotsMap#slots_map.node#node.pool) ||
         SlotsMap <- SlotsMapList, SlotsMap#slots_map.node =/= undefined],
     ok.
