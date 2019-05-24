@@ -2,7 +2,7 @@
 -behaviour(supervisor).
 
 %% API.
--export([create/2]).
+-export([create/7]).
 -export([stop/1]).
 -export([transaction/2]).
 
@@ -12,24 +12,14 @@
 
 -include("eredis_cluster.hrl").
 
--spec create(Host::string(), Port::integer()) ->
-    {ok, PoolName::atom()} | {error, PoolName::atom()}.
-create(Host, Port) ->
-	PoolName = get_name(Host, Port),
-
+create(PoolName, Host, Port, DataBase, Password, Size, MaxOverflow) ->
     case whereis(PoolName) of
         undefined ->
-            DataBase = application:get_env(eredis_cluster, database, 0),
-            Password = application:get_env(eredis_cluster, password, ""),
             WorkerArgs = [{host, Host},
                           {port, Port},
                           {database, DataBase},
                           {password, Password}
                          ],
-
-        	Size = application:get_env(eredis_cluster, pool_size, 10),
-        	MaxOverflow = application:get_env(eredis_cluster, pool_max_overflow, 0),
-
             PoolArgs = [{name, {local, PoolName}},
                         {worker_module, eredis_cluster_pool_worker},
                         {size, Size},
@@ -38,7 +28,7 @@ create(Host, Port) ->
             ChildSpec = poolboy:child_spec(PoolName, PoolArgs, WorkerArgs),
 
             {Result, _} = supervisor:start_child(?MODULE,ChildSpec),
-        	{Result, PoolName};
+            {Result, PoolName};
         _ ->
             {ok, PoolName}
     end.
@@ -59,15 +49,11 @@ stop(PoolName) ->
     supervisor:delete_child(?MODULE,PoolName),
     ok.
 
--spec get_name(Host::string(), Port::integer()) -> PoolName::atom().
-get_name(Host, Port) ->
-    list_to_atom(Host ++ "#" ++ integer_to_list(Port)).
-
 -spec start_link() -> {ok, pid()}.
 start_link() ->
-	supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 -spec init([])
-	-> {ok, {{supervisor:strategy(), 1, 5}, [supervisor:child_spec()]}}.
+    -> {ok, {{supervisor:strategy(), 1, 5}, [supervisor:child_spec()]}}.
 init([]) ->
-	{ok, {{one_for_one, 1, 5}, []}}.
+    {ok, {{one_for_one, 1, 5}, []}}.
