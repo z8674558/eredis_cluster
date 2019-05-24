@@ -207,7 +207,7 @@ connect_(PoolName, Opts) ->
         database = proplists:get_value(database, Opts, 0),
         password = proplists:get_value(password, Opts, ""),
         size     = proplists:get_value(pool_size, Opts, 10),
-        max_overflow = proplists:get_value(ool_max_overflow, Opts, 0)
+        max_overflow = proplists:get_value(pool_max_overflow, Opts, 0)
     },
 
     reload_slots_map(State).
