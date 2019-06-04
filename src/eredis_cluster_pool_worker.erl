@@ -4,7 +4,7 @@
 
 %% API.
 -export([start_link/1]).
--export([query/2]).
+-export([query/2, is_connected/1]).
 
 %% gen_server.
 -export([init/1]).
@@ -14,7 +14,12 @@
 -export([terminate/2]).
 -export([code_change/3]).
 
--record(state, {conn}).
+-record(state, {conn, host, port, database, password}).
+
+-define(RECONNECT_TIME, 100).
+
+is_connected(Pid) ->
+    gen_server:call(Pid, is_connected).
 
 start_link(Args) ->
     gen_server:start_link(?MODULE, Args, []).
@@ -26,17 +31,12 @@ init(Args) ->
     Password = proplists:get_value(password, Args, ""),
 
     process_flag(trap_exit, true),
-    Result = eredis:start_link(Hostname, Port, DataBase, Password),
-    process_flag(trap_exit, false),
-
-    Conn = case Result of
-        {ok,Connection} ->
-            Connection;
-        _ ->
-            undefined
-    end,
-
-    {ok, #state{conn=Conn}}.
+    Conn = start_connection(Hostname, Port, DataBase, Password),
+    {ok, #state{conn = Conn,
+                host = Hostname,
+                port = Port,
+                database = DataBase,
+                password = Password}}.
 
 query(Worker, Commands) ->
     gen_server:call(Worker, {'query', Commands}).
@@ -48,11 +48,24 @@ handle_call({'query', [[X|_]|_] = Commands}, _From, #state{conn = Conn} = State)
     {reply, eredis:qp(Conn, Commands), State};
 handle_call({'query', Command}, _From, #state{conn = Conn} = State) ->
     {reply, eredis:q(Conn, Command), State};
+handle_call(is_connected, _From, #state{conn = Conn}= State) ->
+    {reply, Conn =/= undefined andalso is_process_alive(Conn), State};
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
+
+handle_info(reconnect, #state{host = Hostname,
+                              port = Port,
+                              database = DataBase,
+                              password = Password} = State) ->
+    Conn = start_connection(Hostname, Port, DataBase, Password),
+    {noreply, State#state{conn = Conn}};
+
+handle_info({'EXIT', Pid, _Reason}, #state{conn = Pid} = State) ->
+    erlang:send_after(?RECONNECT_TIME, self(), reconnect),
+    {noreply, State#state{conn = undefined}};
 
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -63,3 +76,13 @@ terminate(_Reason, #state{conn=Conn}) ->
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
+
+
+start_connection(Hostname, Port, DataBase, Password) ->
+    case eredis:start_link(Hostname, Port, DataBase, Password, no_reconnect) of
+        {ok,Connection} ->
+            Connection;
+        _ ->
+            erlang:send_after(?RECONNECT_TIME, self(), reconnect),
+            undefined
+    end.

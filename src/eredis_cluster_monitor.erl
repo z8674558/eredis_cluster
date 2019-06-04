@@ -179,7 +179,7 @@ connect_node(Node = #node{address  = Host, port = Port}, #state{pool_name = Pool
 safe_eredis_start_link(#node{address = Host, port = Port},
                        #state{database = DataBase, password = Password}) ->
     process_flag(trap_exit, true),
-    Payload = eredis:start_link(Host, Port, DataBase, Password),
+    Payload = eredis:start_link(Host, Port, DataBase, Password, no_reconnect),
     process_flag(trap_exit, false),
     Payload.
 
