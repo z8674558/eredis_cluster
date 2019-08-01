@@ -182,7 +182,7 @@ query(PoolName, Transaction, Slot, Counter) ->
         Result -> Result
     end.
 
-handle_transaction_result(Result, Version) ->
+handle_transaction_result(Result, _Version) ->
     case Result of
        % If we detect a node went down, we should probably refresh the slot
         % mapping.
