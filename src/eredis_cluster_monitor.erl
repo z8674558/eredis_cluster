@@ -81,27 +81,25 @@ get_pool_by_slot(Name, Slot) ->
 
 -spec reload_slots_map(State::#state{}) -> NewState::#state{}.
 reload_slots_map(State = #state{pool_name = PoolName}) ->
-    [close_connection(SlotsMap)
-        || SlotsMap <- tuple_to_list(State#state.slots_maps)],
-
-    ClusterSlots = get_cluster_slots(State#state.init_nodes, State),
-
-    SlotsMaps = parse_cluster_slots(ClusterSlots),
-    ConnectedSlotsMaps = connect_all_slots(SlotsMaps, State),
-    Slots = create_slots_cache(ConnectedSlotsMaps),
-
-    NewState = State#state{
-        slots = list_to_tuple(Slots),
-        slots_maps = list_to_tuple(ConnectedSlotsMaps),
-        version = State#state.version + 1
-    },
-
+    NewState = case get_cluster_slots(State#state.init_nodes, State) of
+        [] -> State#state{version = State#state.version + 1};
+        ClusterSlots ->
+            [close_connection(SlotsMap)
+                || SlotsMap <- tuple_to_list(State#state.slots_maps)],
+            SlotsMaps = parse_cluster_slots(ClusterSlots),
+            ConnectedSlotsMaps = connect_all_slots(SlotsMaps, State),
+            Slots = create_slots_cache(ConnectedSlotsMaps),
+            State#state{
+                slots = list_to_tuple(Slots),
+                slots_maps = list_to_tuple(ConnectedSlotsMaps),
+                version = State#state.version + 1
+            }
+    end,
     true = ets:insert(?MODULE, [{PoolName, NewState}]),
-
     NewState.
 
 get_cluster_slots([], _State) ->
-    throw({error,cannot_connect_to_cluster});
+    [];
 get_cluster_slots([Node|T], State) ->
     case safe_eredis_start_link(Node, State) of
         {ok,Connection} ->
@@ -164,12 +162,11 @@ close_connection(SlotsMap) ->
             ok
     end.
 
-connect_node(Node = #node{address  = Host, port = Port}, #state{pool_name = Pool,
-                                                                database = DataBase,
+connect_node(Node = #node{address  = Host, port = Port}, #state{database = DataBase,
                                                                 password = Password,
                                                                 size     = Size,
                                                                 max_overflow = MaxOverflow}) ->
-    case eredis_cluster_pool:create(Pool, Host, Port, DataBase, Password, Size, MaxOverflow) of
+    case eredis_cluster_pool:create(Host, Port, DataBase, Password, Size, MaxOverflow) of
         {ok, Pool} ->
             Node#node{pool = Pool};
         _ ->
@@ -178,10 +175,7 @@ connect_node(Node = #node{address  = Host, port = Port}, #state{pool_name = Pool
 
 safe_eredis_start_link(#node{address = Host, port = Port},
                        #state{database = DataBase, password = Password}) ->
-    process_flag(trap_exit, true),
-    Payload = eredis:start_link(Host, Port, DataBase, Password, no_reconnect),
-    process_flag(trap_exit, false),
-    Payload.
+    eredis:start_link(Host, Port, DataBase, Password, no_reconnect).
 
 -spec create_slots_cache([#slots_map{}]) -> [integer()].
 create_slots_cache(SlotsMaps) ->

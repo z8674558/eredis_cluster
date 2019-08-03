@@ -2,7 +2,7 @@
 -behaviour(supervisor).
 
 %% API.
--export([create/7]).
+-export([create/6]).
 -export([stop/1]).
 -export([transaction/2]).
 
@@ -12,7 +12,8 @@
 
 -include("eredis_cluster.hrl").
 
-create(PoolName, Host, Port, DataBase, Password, Size, MaxOverflow) ->
+create(Host, Port, DataBase, Password, Size, MaxOverflow) ->
+    PoolName = get_name(Host, Port),
     case whereis(PoolName) of
         undefined ->
             WorkerArgs = [{host, Host},
@@ -57,3 +58,6 @@ start_link() ->
     -> {ok, {{supervisor:strategy(), 1, 5}, [supervisor:child_spec()]}}.
 init([]) ->
     {ok, {{one_for_one, 1, 5}, []}}.
+
+get_name(Host, Port) ->
+    list_to_atom(Host ++ "#" ++ integer_to_list(Port)).
