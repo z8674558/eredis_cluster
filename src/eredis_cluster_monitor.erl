@@ -2,12 +2,11 @@
 -behaviour(gen_server).
 
 %% API.
--export([start_link/0]).
--export([connect/1]).
--export([refresh_mapping/1]).
--export([get_state/0, get_state_version/1]).
--export([get_pool_by_slot/1, get_pool_by_slot/2]).
--export([get_all_pools/0]).
+-export([start_link/2]).
+-export([refresh_mapping/2]).
+-export([get_state/1, get_state_version/1]).
+-export([get_pool_by_slot/2]).
+-export([get_all_pools/1]).
 
 %% gen_server.
 -export([init/1]).
@@ -23,37 +22,41 @@
     init_nodes :: [#node{}],
     slots :: tuple(), %% whose elements are integer indexes into slots_maps
     slots_maps :: tuple(), %% whose elements are #slots_map{}
-    version :: integer()
+    version :: integer(),
+    pool_name :: atom(),
+    database = 0 :: integer(),
+    password = "" :: string(),
+    size     = 10 :: integer(),
+    max_overflow = 0 :: integer(),
+    options :: list()
 }).
 
 %% API.
--spec start_link() -> {ok, pid()}.
-start_link() ->
-    gen_server:start_link({local,?MODULE}, ?MODULE, [], []).
+start_link(Name, Opts) ->
+    gen_server:start_link({local, name(Name)}, ?MODULE, [Name, Opts], []).
 
-connect(InitServers) ->
-    gen_server:call(?MODULE,{connect,InitServers}).
-
-refresh_mapping(Version) ->
-    gen_server:call(?MODULE,{reload_slots_map,Version}).
+refresh_mapping(Name, Version) ->
+    case whereis(name(Name)) of
+        undefined -> {error, not_find_process};
+        Pid -> gen_server:call(Pid, {reload_slots_map, Version})
+    end.
 
 %% =============================================================================
 %% @doc Given a slot return the link (Redis instance) to the mapped
 %% node.
 %% @end
 %% =============================================================================
-
--spec get_state() -> #state{}.
-get_state() ->
-    [{cluster_state, State}] = ets:lookup(?MODULE, cluster_state),
-    State.
+get_state(Name) ->
+    case ets:lookup(?MODULE, Name) of
+        undefined -> #state{};
+        [{Name, State}] -> State
+    end.
 
 get_state_version(State) ->
     State#state.version.
 
--spec get_all_pools() -> [pid()].
-get_all_pools() ->
-    State = get_state(),
+get_all_pools(Name) ->
+    State = get_state(Name),
     SlotsMapList = tuple_to_list(State#state.slots_maps),
     [SlotsMap#slots_map.node#node.pool || SlotsMap <- SlotsMapList,
         SlotsMap#slots_map.node =/= undefined].
@@ -63,9 +66,7 @@ get_all_pools() ->
 %% to prevent from querying ets inside loops.
 %% @end
 %% =============================================================================
--spec get_pool_by_slot(Slot::integer(), State::#state{}) ->
-    {PoolName::atom() | undefined, Version::integer()}.
-get_pool_by_slot(Slot, State) -> 
+get_pool_by_slot(Slot, State) when is_integer(Slot) ->
     Index = element(Slot+1,State#state.slots),
     Cluster = element(Index,State#state.slots_maps),
     if
@@ -73,40 +74,35 @@ get_pool_by_slot(Slot, State) ->
             {Cluster#slots_map.node#node.pool, State#state.version};
         true ->
             {undefined, State#state.version}
-    end.
+    end;
 
--spec get_pool_by_slot(Slot::integer()) ->
-    {PoolName::atom() | undefined, Version::integer()}.
-get_pool_by_slot(Slot) ->
-    State = get_state(),
+get_pool_by_slot(Name, Slot) ->
+    State = get_state(Name),
     get_pool_by_slot(Slot, State).
 
 -spec reload_slots_map(State::#state{}) -> NewState::#state{}.
-reload_slots_map(State) ->
-    [close_connection(SlotsMap)
-        || SlotsMap <- tuple_to_list(State#state.slots_maps)],
-
-    ClusterSlots = get_cluster_slots(State#state.init_nodes),
-
-    SlotsMaps = parse_cluster_slots(ClusterSlots),
-    ConnectedSlotsMaps = connect_all_slots(SlotsMaps),
-    Slots = create_slots_cache(ConnectedSlotsMaps),
-
-    NewState = State#state{
-        slots = list_to_tuple(Slots),
-        slots_maps = list_to_tuple(ConnectedSlotsMaps),
-        version = State#state.version + 1
-    },
-
-    true = ets:insert(?MODULE, [{cluster_state, NewState}]),
-
+reload_slots_map(State = #state{pool_name = PoolName}) ->
+    NewState = case get_cluster_slots(State#state.init_nodes, State) of
+        [] -> State#state{version = State#state.version + 1};
+        ClusterSlots ->
+            [close_connection(SlotsMap)
+                || SlotsMap <- tuple_to_list(State#state.slots_maps)],
+            SlotsMaps = parse_cluster_slots(ClusterSlots),
+            ConnectedSlotsMaps = connect_all_slots(SlotsMaps, State),
+            Slots = create_slots_cache(ConnectedSlotsMaps),
+            State#state{
+                slots = list_to_tuple(Slots),
+                slots_maps = list_to_tuple(ConnectedSlotsMaps),
+                version = State#state.version + 1
+            }
+    end,
+    true = ets:insert(?MODULE, [{PoolName, NewState}]),
     NewState.
 
--spec get_cluster_slots([#node{}]) -> [[bitstring() | [bitstring()]]].
-get_cluster_slots([]) ->
-    throw({error,cannot_connect_to_cluster});
-get_cluster_slots([Node|T]) ->
-    case safe_eredis_start_link(Node#node.address, Node#node.port) of
+get_cluster_slots([], _State) ->
+    [];
+get_cluster_slots([Node|T], State) ->
+    case safe_eredis_start_link(Node, State) of
         {ok,Connection} ->
           case eredis:q(Connection, ["CLUSTER", "SLOTS"]) of
             {error,<<"ERR unknown command 'CLUSTER'">>} ->
@@ -118,10 +114,10 @@ get_cluster_slots([Node|T]) ->
                 ClusterInfo;
             _ ->
                 eredis:stop(Connection),
-                get_cluster_slots(T)
+                get_cluster_slots(T, State)
         end;
         _ ->
-            get_cluster_slots(T)
+            get_cluster_slots(T, State)
   end.
 
 -spec get_cluster_slots_from_single_node(#node{}) ->
@@ -167,22 +163,20 @@ close_connection(SlotsMap) ->
             ok
     end.
 
--spec connect_node(#node{}) -> #node{} | undefined.
-connect_node(Node) ->
-    case eredis_cluster_pool:create(Node#node.address, Node#node.port) of
+connect_node(Node = #node{address  = Host, port = Port}, #state{database = DataBase,
+                                                                password = Password,
+                                                                size     = Size,
+                                                                max_overflow = MaxOverflow, options = Options}) ->
+    case eredis_cluster_pool:create(Host, Port, DataBase, Password, Size, MaxOverflow, Options) of
         {ok, Pool} ->
-            Node#node{pool=Pool};
+            Node#node{pool = Pool};
         _ ->
             undefined
     end.
 
-safe_eredis_start_link(Address,Port) ->
-    process_flag(trap_exit, true),
-    DataBase = application:get_env(eredis_cluster, database, 0),
-    Password = application:get_env(eredis_cluster, password, ""),
-    Payload = eredis:start_link(Address, Port, DataBase, Password),
-    process_flag(trap_exit, false),
-    Payload.
+safe_eredis_start_link(#node{address = Host, port = Port},
+                       #state{database = DataBase, password = Password, options = Options}) ->
+    eredis:start_link(Host, Port, DataBase, Password, no_reconnect, 5000, Options).
 
 -spec create_slots_cache([#slots_map{}]) -> [integer()].
 create_slots_cache(SlotsMaps) ->
@@ -194,37 +188,36 @@ create_slots_cache(SlotsMaps) ->
   SortedSlotsCache = lists:sort(SlotsCacheF),
   [ Index || {_,Index} <- SortedSlotsCache].
 
--spec connect_all_slots([#slots_map{}]) -> [integer()].
-connect_all_slots(SlotsMapList) ->
-    [SlotsMap#slots_map{node=connect_node(SlotsMap#slots_map.node)}
+connect_all_slots(SlotsMapList, State) ->
+    [SlotsMap#slots_map{node=connect_node(SlotsMap#slots_map.node, State)}
         || SlotsMap <- SlotsMapList].
 
--spec connect_([{Address::string(), Port::integer()}]) -> #state{}.
-connect_([]) ->
-    #state{};
-connect_(InitNodes) ->
+connect_(PoolName, Opts) ->
     State = #state{
         slots = undefined,
         slots_maps = {},
-        init_nodes = [#node{address = A, port = P} || {A,P} <- InitNodes],
-        version = 0
+        init_nodes = [#node{address= A, port = P} || {A,P} <- proplists:get_value(servers, Opts, [])],
+        version = 0,
+        pool_name = PoolName,
+        database = proplists:get_value(database, Opts, 0),
+        password = proplists:get_value(password, Opts, ""),
+        size     = proplists:get_value(pool_size, Opts, 10),
+        max_overflow = proplists:get_value(pool_max_overflow, Opts, 0),
+        options = proplists:get_value(options, Opts, [])
     },
 
     reload_slots_map(State).
 
 %% gen_server.
 
-init(_Args) ->
-    ets:new(?MODULE, [protected, set, named_table, {read_concurrency, true}]),
-    InitNodes = application:get_env(eredis_cluster, init_nodes, []),
-    {ok, connect_(InitNodes)}.
+init([PoolName, Opts]) ->
+    process_flag(trap_exit, true),
+    {ok, connect_(PoolName, Opts)}.
 
 handle_call({reload_slots_map,Version}, _From, #state{version=Version} = State) ->
     {reply, ok, reload_slots_map(State)};
 handle_call({reload_slots_map,_}, _From, State) ->
     {reply, ok, State};
-handle_call({connect, InitServers}, _From, _State) ->
-    {reply, ok, connect_(InitServers)};
 handle_call(_Request, _From, State) ->
     {reply, ignored, State}.
 
@@ -234,8 +227,51 @@ handle_cast(_Msg, State) ->
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, _State) ->
+terminate(_Reason, #state{slots_maps = Slots}) ->
+    SlotsMapList = tuple_to_list(Slots),
+    [eredis_cluster_pool:stop(SlotsMap#slots_map.node#node.pool) ||
+        SlotsMap <- SlotsMapList, SlotsMap#slots_map.node =/= undefined],
     ok.
-
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
+% Down
+code_change({down, _V}, #state{slots = Slots,
+                               slots_maps = SlotsMaps,
+                               init_nodes = InitNodes,
+                               version = Version,
+                               pool_name = PoolName,
+                               database = DataBase,
+                               password = Password,
+                               size     = Size,
+                               max_overflow = MaxOverflow,
+                               options = Options}, _Extra) ->
+    {ok, {state, Slots,
+                 SlotsMaps,
+                 InitNodes,
+                 Version,
+                 PoolName,
+                 DataBase,
+                 Password,
+                 Size,
+                 MaxOverflow,
+                 Options}};
+% UP
+code_change(_V, #state{slots = Slots,
+                       slots_maps = SlotsMaps,
+                       init_nodes = InitNodes,
+                       version = Version,
+                       pool_name = PoolName,
+                       database = DataBase,
+                       password = Password,
+                       size     = Size,
+                       max_overflow = MaxOverflow}, _Extra) ->
+    {ok, {state, Slots,
+                 SlotsMaps,
+                 InitNodes,
+                 Version,
+                 PoolName,
+                 DataBase,
+                 Password,
+                 Size,
+                 MaxOverflow,
+                 []}}.
+name(Name) ->
+    list_to_atom("monitor_" ++ atom_to_list(Name)).
