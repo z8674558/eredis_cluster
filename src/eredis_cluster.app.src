@@ -1,5 +1,5 @@
 {application, eredis_cluster, [
-    {description, "Eredis Cluster"},
+    {description, "Redis Cluster pool"},
     {vsn, "git"},
     {modules, []},
     {registered, []},
