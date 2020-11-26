@@ -27,8 +27,7 @@
     database = 0 :: integer(),
     password = "" :: string(),
     size     = 10 :: integer(),
-    max_overflow = 0 :: integer(),
-    options :: list()
+    max_overflow = 0 :: integer()
 }).
 
 %% API.
@@ -166,7 +165,11 @@ close_connection(SlotsMap) ->
 connect_node(Node = #node{address  = Host, port = Port}, #state{database = DataBase,
                                                                 password = Password,
                                                                 size     = Size,
-                                                                max_overflow = MaxOverflow, options = Options}) ->
+                                                                max_overflow = MaxOverflow}) ->
+    Options = case erlang:put(options) of
+        undefined -> [];
+        Options0 -> Options0
+    end,
     case eredis_cluster_pool:create(Host, Port, DataBase, Password, Size, MaxOverflow, Options) of
         {ok, Pool} ->
             Node#node{pool = Pool};
@@ -175,7 +178,11 @@ connect_node(Node = #node{address  = Host, port = Port}, #state{database = DataB
     end.
 
 safe_eredis_start_link(#node{address = Host, port = Port},
-                       #state{database = DataBase, password = Password, options = Options}) ->
+                       #state{database = DataBase, password = Password}) ->
+    Options = case erlang:put(options) of
+        undefined -> [];
+        Options0 -> Options0
+    end,
     eredis:start_link(Host, Port, DataBase, Password, no_reconnect, 5000, Options).
 
 -spec create_slots_cache([#slots_map{}]) -> [integer()].
@@ -193,6 +200,7 @@ connect_all_slots(SlotsMapList, State) ->
         || SlotsMap <- SlotsMapList].
 
 connect_(PoolName, Opts) ->
+    erlang:put(options, proplists:get_value(options, Opts, [])),
     State = #state{
         slots = undefined,
         slots_maps = {},
@@ -202,10 +210,8 @@ connect_(PoolName, Opts) ->
         database = proplists:get_value(database, Opts, 0),
         password = proplists:get_value(password, Opts, ""),
         size     = proplists:get_value(pool_size, Opts, 10),
-        max_overflow = proplists:get_value(pool_max_overflow, Opts, 0),
-        options = proplists:get_value(options, Opts, [])
+        max_overflow = proplists:get_value(pool_max_overflow, Opts, 0)
     },
-
     reload_slots_map(State).
 
 %% gen_server.
@@ -233,45 +239,8 @@ terminate(_Reason, #state{slots_maps = Slots}) ->
         SlotsMap <- SlotsMapList, SlotsMap#slots_map.node =/= undefined],
     ok.
 % Down
-code_change({down, _V}, #state{slots = Slots,
-                               slots_maps = SlotsMaps,
-                               init_nodes = InitNodes,
-                               version = Version,
-                               pool_name = PoolName,
-                               database = DataBase,
-                               password = Password,
-                               size     = Size,
-                               max_overflow = MaxOverflow,
-                               options = Options}, _Extra) ->
-    {ok, {state, Slots,
-                 SlotsMaps,
-                 InitNodes,
-                 Version,
-                 PoolName,
-                 DataBase,
-                 Password,
-                 Size,
-                 MaxOverflow,
-                 Options}};
-% UP
-code_change(_V, #state{slots = Slots,
-                       slots_maps = SlotsMaps,
-                       init_nodes = InitNodes,
-                       version = Version,
-                       pool_name = PoolName,
-                       database = DataBase,
-                       password = Password,
-                       size     = Size,
-                       max_overflow = MaxOverflow}, _Extra) ->
-    {ok, {state, Slots,
-                 SlotsMaps,
-                 InitNodes,
-                 Version,
-                 PoolName,
-                 DataBase,
-                 Password,
-                 Size,
-                 MaxOverflow,
-                 []}}.
+code_change(_, State, _Extra) ->
+    {ok, State}.
+
 name(Name) ->
     list_to_atom("monitor_" ++ atom_to_list(Name)).

@@ -14,7 +14,7 @@
 -export([terminate/2]).
 -export([code_change/3]).
 
--record(state, {conn, host, port, database, password, options}).
+-record(state, {conn, host, port, database, password}).
 
 -define(RECONNECT_TIME, 100).
 
@@ -30,14 +30,14 @@ init(Args) ->
     DataBase = proplists:get_value(database, Args, 0),
     Password = proplists:get_value(password, Args, ""),
     Options = proplists:get_value(options, Args, []),
+    erlang:put(options, Options),
     process_flag(trap_exit, true),
-    Conn = start_connection(Hostname, Port, DataBase, Password),
+    Conn = start_connection(Hostname, Port, DataBase, Password, Options),
     {ok, #state{conn = Conn,
                 host = Hostname,
                 port = Port,
                 database = DataBase,
-                password = Password,
-                options = Options}}.
+                password = Password}}.
 
 query(Worker, Commands) ->
     gen_server:call(Worker, {'query', Commands}).
@@ -61,7 +61,11 @@ handle_info(reconnect, #state{host = Hostname,
                               port = Port,
                               database = DataBase,
                               password = Password} = State) ->
-    Conn = start_connection(Hostname, Port, DataBase, Password),
+    Options = case erlang:put(options) of
+        undefined -> [];
+        Options0 -> Options0
+    end,
+    Conn = start_connection(Hostname, Port, DataBase, Password, Options),
     {noreply, State#state{conn = Conn}};
 
 handle_info({'EXIT', Pid, _Reason}, #state{conn = Pid} = State) ->
@@ -76,27 +80,15 @@ terminate(_Reason, #state{conn=undefined}) ->
 terminate(_Reason, #state{conn=Conn}) ->
     ok = eredis:stop(Conn),
     ok.
-% Down
-code_change({down, _V}, #state{conn = Conn,
-                               host = Host,
-                               port = Port,
-                               database = DataBase,
-                               password = Password}, _Extra) ->
-    {ok, {state, Conn, Host, Port, DataBase, Password}};
 
-% Up
-code_change(_V, #state{conn = Conn,
-                       host = Host,
-                       port = Port,
-                       database = DataBase,
-                       password = Password}, _Extra) ->
-    {ok, {state, Conn, Host, Port, DataBase, Password, []}}.% Up to 0.6.2
+code_change(_, State, _Extra) ->
+    {ok, State}.
 
-start_connection(Hostname, Port, DataBase, Password) ->
+start_connection(Hostname, Port, DataBase, Password, Options) ->
     case eredis:start_link(Hostname, Port, DataBase, Password, no_reconnect) of
         {ok,Connection} ->
             Connection;
         _ ->
-            erlang:send_after(?RECONNECT_TIME, self(), reconnect),
+            erlang:send_after(?RECONNECT_TIME, self(), reconnect, 5000, Options),
             undefined
     end.
